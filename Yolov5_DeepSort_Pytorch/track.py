@@ -1,10 +1,10 @@
 # limit the number of cpus used by high performance libraries
 import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "3"
+os.environ["OPENBLAS_NUM_THREADS"] = "3"
+os.environ["MKL_NUM_THREADS"] = "3"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "3"
+os.environ["NUMEXPR_NUM_THREADS"] = "3"
 
 import sys
 sys.path.insert(0, './yolov5')
@@ -18,7 +18,8 @@ from pathlib import Path
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
-
+import numpy as np
+from math import sqrt
 from yolov5.models.experimental import attempt_load
 from yolov5.utils.downloads import attempt_download
 from yolov5.models.common import DetectMultiBackend
@@ -37,6 +38,7 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 count = 0
 data = []
+
 def detect(opt):
     out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, project, name, exist_ok= \
         opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
@@ -107,6 +109,10 @@ def detect(opt):
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
     dt, seen = [0.0, 0.0, 0.0, 0.0], 0
+
+    # Lista donde se guardan las detecciones
+    aux_outputs = []
+
     for frame_idx, (path, img, im0s, vid_cap, s) in enumerate(dataset):
         t1 = time_sync()
         img = torch.from_numpy(img).to(device)
@@ -116,6 +122,13 @@ def detect(opt):
             img = img.unsqueeze(0)
         t2 = time_sync()
         dt[0] += t2 - t1
+
+        # Video time
+        fps = vid_cap.get(cv2.CAP_PROP_FPS)
+        current_frame = int(vid_cap.get(cv2.CAP_PROP_POS_FRAMES))
+        duration = round(current_frame/fps, 3)
+        minutes = int(duration/60)
+        seconds = round(duration%60, 3)
 
         # Inference
         visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if opt.visualize else False
@@ -129,6 +142,7 @@ def detect(opt):
 
         # Process detections
         for i, det in enumerate(pred):  # detections per image
+
             seen += 1
             if webcam:  # batch_size >= 1
                 p, im0, _ = path[i], im0s[i].copy(), dataset.count
@@ -160,19 +174,65 @@ def detect(opt):
                 t4 = time_sync()
                 outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
                 t5 = time_sync()
-                dt[3] += t5 - t4
+                dt[3] += t5 - t4              
+                
+                print("aux_outputs")
+                print(aux_outputs)
+                print("Yolo + Deep Detections")
+                print(outputs)
 
-                # draw boxes for visualization
+                # Process every detection output
                 if len(outputs) > 0:
                     for j, (output, conf) in enumerate(zip(outputs, confs)):
+                        print(f"{j}. Procesando")
+                        # We need to save every id, class, center, duration - for this aproach we'll use the number of the frame.
+                        print(output)
 
                         bboxes = output[0:4]
+                        # Find center
+                        center = xywh_center(bboxes)
                         id = output[4]
                         cls = output[5]
+
+                        # Cambiar aux output por struct!!!
+                        aux_output = [id, cls, center, current_frame, 0]
+                        print(aux_output)
+
+                        # Cuando se agregue una detección:
+                        # revisar si existe el id anteriormente
+                        ndetected = len(aux_outputs)
+                        if ndetected>0:
+                            for x in range(ndetected):
+                                print(x)
+                                prev = aux_outputs[x]
+
+                                if prev[0] == aux_output[0]:
+                                    print(f"ID:{aux_output[0]} encontrado")
+                        #           calcular la distancia entre los centros
+                                    dist = sqrt((prev[2][0] - aux_output[2][0])**2 + (prev[2][1] - aux_output[2][1])**2)
+                        #           si esta ha cambiado < threshold:
+                                    if dist < 5:
+                                        prev[4] += 1 
+                                    else:
+                                        prev[4] = 0 
+                                    prev[2] = aux_output[2] # Actualizar centro
+                                    break
+
+
+                                elif x==ndetected-1 :                   
+                                    print("Se agrega 1")    
+                                    aux_outputs.append(aux_output)
+                        else: 
+                            print("Se agrega porque esta vacio")    
+                            aux_outputs.append(aux_output)
+
+
                         #count
                         count_obj(bboxes,w,h,id)
+                        #print(count)
                         c = int(cls)  # integer class
                         label = f'{id} {names[c]} {conf:.2f}'
+                        print("Counting: "+ str(names[c]))
                         annotator.box_label(bboxes, label, color=colors(c, True))
 
                         if save_txt:
@@ -195,10 +255,12 @@ def detect(opt):
             # Stream results
             im0 = annotator.result()
             if show_vid:
+                # print time
+                cv2.putText(im0, "Time: " + str(minutes) + ':' + str(seconds), (500,15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
                 global count
                 color=(0,255,0)
-                start_point = (0, h-350)
-                end_point = (w, h-350)
+                start_point = (0, h-50)
+                end_point = (w, h-100)
                 cv2.line(im0, start_point, end_point, color, thickness=2)
                 thickness = 3
                 org = (150, 150)
@@ -235,13 +297,19 @@ def detect(opt):
         if platform == 'darwin':  # MacOS
             os.system('open ' + save_path)
 
+#######################
+# Funciones
+
 def count_obj(box,w,h,id):
-    global count,data
-    center_coordinates = (int(box[0]+(box[2]-box[0])/2) , int(box[1]+(box[3]-box[1])/2))
-    if int(box[1]+(box[3]-box[1])/2) > (h -350):
+    global count, data
+    if int(box[1]+(box[3]-box[1])/2) > (h-70):
         if  id not in data:
             count += 1
             data.append(id)
+
+def xywh_center(box):
+    center_coordinates = (int(box[0]+(box[2]-box[0])/2) , int(box[1]+(box[3]-box[1])/2))
+    return center_coordinates
 
 
 if __name__ == '__main__':
@@ -251,7 +319,7 @@ if __name__ == '__main__':
     parser.add_argument('--source', type=str, default='videos/Traffic.mp4', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[480], help='inference size h,w')
-    parser.add_argument('--conf-thres', type=float, default=0.5, help='object confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.40, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
     parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
@@ -259,7 +327,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-vid', action='store_true', help='save video tracking results')
     parser.add_argument('--save-txt', action='store_true', help='save MOT compliant results to *.txt')
     # class 0 is person, 1 is bycicle, 2 is car... 79 is oven
-    parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --class 0, or --class 16 17')
+    parser.add_argument('--classes', nargs='+', type=int, default=[0,1,2,3,5,7],help='filter by class: --class 0, or --class 16 17')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--evaluate', action='store_true', help='augmented inference')
@@ -276,3 +344,6 @@ if __name__ == '__main__':
 
     with torch.no_grad():
         detect(opt)
+
+
+# python track.py --device 0 --save-txt --save-vid --name test --source videos/Vista_Morande_cut.mp4 --img 720 528
