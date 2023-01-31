@@ -210,6 +210,8 @@ def detect(opt):
                         #print(output)
 
                         bboxes = output[0:4]
+                        # Find center
+                        center = xywh_center(bboxes)
                         id = output[4]
                         cls = output[5]
 
@@ -245,6 +247,7 @@ def detect(opt):
                         #count
                         
                         count_obj(bboxes,w,h,id)
+                        #print(count)
                         c = int(cls)  # integer class
                         #print("Counting: "+ str(names[c]))
 
