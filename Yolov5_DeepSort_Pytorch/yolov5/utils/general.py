@@ -843,6 +843,11 @@ def increment_path(path, exist_ok=False, sep='', mkdir=False):
         path.mkdir(parents=True, exist_ok=True)  # make directory
     return path
 
+def center_handle(x1,y1,x2,y2):
+  cx = x1 + int((x2 - x1)/2)
+  cy = y1 + int((y2 - y1)/2)
+  return cx,cy
+
 
 # Variables
 NCOLS = 0 if is_docker() else shutil.get_terminal_size().columns  # terminal window size for tqdm

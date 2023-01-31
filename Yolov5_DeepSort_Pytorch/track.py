@@ -1,10 +1,10 @@
 # limit the number of cpus used by high performance libraries
 import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "3"
+os.environ["OPENBLAS_NUM_THREADS"] = "3"
+os.environ["MKL_NUM_THREADS"] = "3"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "3"
+os.environ["NUMEXPR_NUM_THREADS"] = "3"
 
 import sys
 sys.path.insert(0, './yolov5')
@@ -18,7 +18,8 @@ from pathlib import Path
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
-
+import numpy as np
+from math import sqrt
 from yolov5.models.experimental import attempt_load
 from yolov5.utils.downloads import attempt_download
 from yolov5.models.common import DetectMultiBackend
@@ -30,6 +31,8 @@ from yolov5.utils.plots import Annotator, colors
 from deep_sort.utils.parser import get_config
 from deep_sort.deep_sort import DeepSort
 
+from Detection import Detection
+
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # yolov5 deepsort root directory
 if str(ROOT) not in sys.path:
@@ -37,7 +40,15 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 count = 0
 data = []
+
 def detect(opt):
+    # Inicialización de variables locales
+    k = 0
+    a = 0
+    b = 0
+    fase = 1
+
+
     out, source, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, project, name, exist_ok= \
         opt.output, opt.source, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
         opt.save_txt, opt.imgsz, opt.evaluate, opt.half, opt.project, opt.name, opt.exist_ok
@@ -107,6 +118,10 @@ def detect(opt):
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
     dt, seen = [0.0, 0.0, 0.0, 0.0], 0
+
+    # Lista donde se guardan las detecciones
+    aux_outputs = []
+
     for frame_idx, (path, img, im0s, vid_cap, s) in enumerate(dataset):
         t1 = time_sync()
         img = torch.from_numpy(img).to(device)
@@ -116,6 +131,13 @@ def detect(opt):
             img = img.unsqueeze(0)
         t2 = time_sync()
         dt[0] += t2 - t1
+
+        # Video time
+        fps = vid_cap.get(cv2.CAP_PROP_FPS)
+        current_frame = int(vid_cap.get(cv2.CAP_PROP_POS_FRAMES))
+        duration = round(current_frame/fps, 3)
+        minutes = int(duration/60)
+        seconds = round(duration%60, 3)
 
         # Inference
         visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if opt.visualize else False
@@ -129,6 +151,7 @@ def detect(opt):
 
         # Process detections
         for i, det in enumerate(pred):  # detections per image
+
             seen += 1
             if webcam:  # batch_size >= 1
                 p, im0, _ = path[i], im0s[i].copy(), dataset.count
@@ -160,50 +183,155 @@ def detect(opt):
                 t4 = time_sync()
                 outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
                 t5 = time_sync()
-                dt[3] += t5 - t4
+                dt[3] += t5 - t4              
+                
+                #print("aux_outputs")
+                i = 0
+                if len(aux_outputs):
+                    # Se eliminan las detecciones antiguas
+                    for det in aux_outputs:
+                        #print(det)
+                        det.notDetected()
+                        if det.undetected > 12:
+                            aux_outputs.pop(i)
+                        else:
+                            i += 1
+                #else:
+                    #print("Empty")
+                #print("Yolo + Deep Detections")
+                #print(outputs)
 
-                # draw boxes for visualization
+                # Process every detection output
+                t6 = time_sync()
                 if len(outputs) > 0:
                     for j, (output, conf) in enumerate(zip(outputs, confs)):
+                        # We need to save every id, class, center, duration - for this aproach we'll use the number of the frame.
+                        #print(f"{j}. Procesando")
+                        #print(output)
 
                         bboxes = output[0:4]
                         id = output[4]
                         cls = output[5]
+
+                        detection = Detection(id, cls, bboxes)
+                        #print(detection)
+
+                        #aux_output = [id, cls, center, current_frame, 0]
+                        #print(aux_output)
+
+                        # Se guardan las detecciones
+                        # Cuando se agregue una detección:
+                        # revisar si existe el id anteriormente
+                        prev = False
+                        if len(aux_outputs):
+                            #print("Revisando anteriores...")
+                            for det in aux_outputs:
+                                #print(f"Det.id {det.id}")
+                                if det.id == detection.id:
+                                    #print(f"ID:{detection.id} encontrado!")
+                                    prev = True
+                                    # Actualizar datos de la detección
+                                    det.update(detection.box)
+                                    detection = det
+                                    break
+                            if not(prev):                   
+                                #print("No se encuentra anteriormente, agregando...")    
+                                aux_outputs.append(detection)
+                        else: 
+                            #print("Se agrega porque esta vacio")    
+                            aux_outputs.append(detection)
+
+
                         #count
+                        
                         count_obj(bboxes,w,h,id)
                         c = int(cls)  # integer class
-                        label = f'{id} {names[c]} {conf:.2f}'
+                        #print("Counting: "+ str(names[c]))
+
+                        wait_threshold = 50
+                        if detection.waiting > wait_threshold:
+                            label = f'{id} {names[c]} {conf:.2f} - Wait {detection.waiting}'
+                        else:
+                            label = f'{id} {names[c]} {conf:.2f}'
                         annotator.box_label(bboxes, label, color=colors(c, True))
 
-                        if save_txt:
-                            # to MOT format
-                            bbox_left = output[0]
-                            bbox_top = output[1]
-                            bbox_w = output[2] - output[0]
-                            bbox_h = output[3] - output[1]
-                            # Write MOT compliant results to file
-                            with open(txt_path, 'a') as f:
-                                f.write(('%g ' * 10 + '\n') % (frame_idx + 1, id, bbox_left,  # MOT format
-                                                               bbox_top, bbox_w, bbox_h, -1, -1, -1, -1))
+            if save_txt:
+                veh = 0
+                ped = 0
+                total_wait = 0
+                
+                # Semaphore State
+                # Cálculo de la secuencia del semáforo
+                acumulado = [22,41,73,102,121,153,183,202,233,263,283,314,343,362,393,423,442,473,504,522,552,583,601,633,663,700]
+                
+                print(f"Duracion: {duration}, k = {k}, acumulado: {acumulado[k]}, fase: {fase}")
 
-                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
+                if duration >= acumulado[k]:
+                    #print("Cambio de fase")
+                    fase = (fase + 1)%3
+                    k = k+1
+
+                # Time or Frame - current frame
+                for det in aux_outputs:
+                    # Count Vehicles
+                    if det.cls == 2 or det.cls == 7:
+                        veh += 1
+                    # Count Pedestrian
+                    elif det.cls == 0:
+                        ped += 1
+                    # Wait Acumulated
+                    total_wait = total_wait + det.waiting                        
+
+                # Write results to file
+                with open(txt_path, 'a') as f:
+                    f.write(('%g ' * 5 + '\n') % (current_frame, fase, veh, ped, total_wait))
+
+                t7 = time_sync()
+                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s), Process Detections:({t7 - t6:.3f}s)')
+                a = t3 - t2 + t5 - t4 + a
+                b = t3 - t2 + t5 - t4 + t7 - t6 + b
 
             else:
+                if save_txt:
+                    veh = 0
+                    ped = 0
+                    total_wait = 0
+                    
+                    # Semaphore State
+                    # Cálculo de la secuencia del semáforo
+                    acumulado = [22,41,73,102,121,153,183,202,233,263,283,314,343,362,393,423,442,473,504,522,552,583,601,633,663,700]
+                    
+                    
+                    print(f"Duracion: {duration}, k = {k}, acumulado: {acumulado[k]}, fase: {fase}")
+
+                    if duration >= acumulado[k]:
+                        #print("Cambio de fase")
+                        fase = (fase + 1)%3
+                        k = k+1
+
+                    # Write results to file
+                    with open(txt_path, 'a') as f:
+                        f.write(('%g ' * 5 + '\n') % (current_frame, fase, veh, ped, total_wait))
+
                 deepsort.increment_ages()
                 LOGGER.info('No detections')
 
             # Stream results
+            
             im0 = annotator.result()
             if show_vid:
+                # print time
+                cv2.putText(im0, "Time: " + str(minutes) + ':' + str(seconds), (500,15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+                cv2.putText(im0, "Fase: " + f"{fase}",(350,15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
                 global count
                 color=(0,255,0)
-                start_point = (0, h-350)
-                end_point = (w, h-350)
+                start_point = (0, h-50)
+                end_point = (w, h-100)
                 cv2.line(im0, start_point, end_point, color, thickness=2)
                 thickness = 3
                 org = (150, 150)
                 font = cv2.FONT_HERSHEY_SIMPLEX
-                fontScale = 3
+                fontScale = 1
                 cv2.putText(im0, str(count), org, font, 
                    fontScale, color, thickness, cv2.LINE_AA)
                 cv2.imshow(str(p), im0)
@@ -227,6 +355,8 @@ def detect(opt):
                 vid_writer.write(im0)
 
     # Print results
+    print("Total time YOLO + DeepSort: "+f'{a}')
+    print("Total time YOLO + DeepSort + Wait Algorithm: "+f'{b}')
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms deep sort update \
         per image at shape {(1, 3, *imgsz)}' % t)
@@ -235,13 +365,19 @@ def detect(opt):
         if platform == 'darwin':  # MacOS
             os.system('open ' + save_path)
 
+#######################
+# Funciones
+
 def count_obj(box,w,h,id):
-    global count,data
-    center_coordinates = (int(box[0]+(box[2]-box[0])/2) , int(box[1]+(box[3]-box[1])/2))
-    if int(box[1]+(box[3]-box[1])/2) > (h -350):
+    global count, data
+    if int(box[1]+(box[3]-box[1])/2) > (h-70):
         if  id not in data:
             count += 1
             data.append(id)
+
+def xywh_center(box):
+    center_coordinates = (int(box[0]+(box[2]-box[0])/2) , int(box[1]+(box[3]-box[1])/2))
+    return center_coordinates
 
 
 if __name__ == '__main__':
@@ -251,7 +387,7 @@ if __name__ == '__main__':
     parser.add_argument('--source', type=str, default='videos/Traffic.mp4', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[480], help='inference size h,w')
-    parser.add_argument('--conf-thres', type=float, default=0.5, help='object confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.40, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
     parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
@@ -259,7 +395,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-vid', action='store_true', help='save video tracking results')
     parser.add_argument('--save-txt', action='store_true', help='save MOT compliant results to *.txt')
     # class 0 is person, 1 is bycicle, 2 is car... 79 is oven
-    parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --class 0, or --class 16 17')
+    parser.add_argument('--classes', nargs='+', type=int, default=[0,1,2,3,5,7],help='filter by class: --class 0, or --class 16 17')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--evaluate', action='store_true', help='augmented inference')
@@ -276,3 +412,7 @@ if __name__ == '__main__':
 
     with torch.no_grad():
         detect(opt)
+
+
+# python track.py --device 0 --save-txt --save-vid --name test --source videos/Morande_12_labeled.mp4 --img 720 528
+# python track.py --device 0 --save-txt --save-vid --name test --source videos/Agustinas_12_labeled.mp4 --img 720 528
